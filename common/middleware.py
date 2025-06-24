@@ -12,13 +12,12 @@ class JWTAuthenticationMiddleware(MiddlewareMixin):
     """
     
     def process_request(self, request):
-        # Skip JWT authentication for non-API endpoints
         if not request.path.startswith('/api/'):
             return None
         
-        # Skip JWT for login, signup, and public endpoints
         public_endpoints = [
             '/api/login/',
+            '/api/logout/',
             '/api/signup/',
             '/api/jwt/',
             '/api/schema/',
@@ -32,6 +31,9 @@ class JWTAuthenticationMiddleware(MiddlewareMixin):
         # Get token from Authorization header
         auth_header = request.META.get('HTTP_AUTHORIZATION')
         if not auth_header or not auth_header.startswith('Bearer '):
+            # For OPTIONS requests, skip authentication
+            if request.method == 'OPTIONS':
+                return None
             return JsonResponse({'error': 'Authentication required'}, status=401)
         
         token = auth_header.split(' ')[1]
