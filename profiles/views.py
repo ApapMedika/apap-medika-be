@@ -2,12 +2,14 @@ from rest_framework import generics, status, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.contrib.auth import login, logout
+from django.contrib.auth import login
 from django.db.models import Q
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from oauth2_provider.models import AccessToken
 from django.utils import timezone
+import calendar
+from datetime import date, timedelta
 
 from .models import EndUser, Patient, Doctor
 from .serializers import (
@@ -20,7 +22,7 @@ from common.utils import generate_jwt_token
 
 class LoginView(APIView):
     """
-    Login endpoint
+    Login endpoint (PBI-FE-U1)
     """
     permission_classes = [permissions.AllowAny]
     
@@ -28,7 +30,6 @@ class LoginView(APIView):
         serializer = LoginSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             user = serializer.validated_data['user']
-            login(request, user)
             
             # Generate JWT token
             token = generate_jwt_token(user)
@@ -46,7 +47,7 @@ class LoginView(APIView):
 
 class SignUpView(APIView):
     """
-    Sign up endpoint (PBI-BE-U8)
+    Sign up endpoint (PBI-BE-U8, PBI-FE-U2)
     """
     permission_classes = [permissions.AllowAny]
     
@@ -71,12 +72,11 @@ class SignUpView(APIView):
 
 class LogoutView(APIView):
     """
-    Logout endpoint
+    Logout endpoint (PBI-FE-U3)
     """
     permission_classes = [permissions.IsAuthenticated]
     
     def post(self, request):
-        logout(request)
         return Response({'message': 'Logout successful'}, status=status.HTTP_200_OK)
 
 class UserListView(generics.ListAPIView):
@@ -89,7 +89,7 @@ class UserListView(generics.ListAPIView):
     filterset_fields = ['role']
     search_fields = ['name', 'email', 'username']
     ordering_fields = ['name', 'email', 'created_at']
-    ordering = ['created_at']
+    ordering = ['-created_at']
     
     def get_queryset(self):
         return EndUser.objects.filter(deleted_at__isnull=True)
@@ -102,7 +102,10 @@ class UserDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
     
     def get_object(self):
-        # Get user by id, username, or email
+        # Handle /users/me/ endpoint
+        if self.kwargs.get('pk') == 'me' or not self.kwargs.get('pk'):
+            return self.request.user
+        
         pk = self.kwargs.get('pk')
         
         # Try to find by UUID first
@@ -141,7 +144,7 @@ class PatientListView(generics.ListAPIView):
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ['user__name', 'nik']
     ordering_fields = ['user__name', 'nik', 'user__created_at']
-    ordering = ['user__created_at']
+    ordering = ['-user__created_at']
     
     def get_queryset(self):
         return Patient.objects.filter(user__deleted_at__isnull=True)
@@ -191,7 +194,7 @@ class DoctorListView(generics.ListAPIView):
     filterset_fields = ['specialization']
     search_fields = ['user__name', 'id']
     ordering_fields = ['user__name', 'specialization', 'years_of_experience', 'user__created_at']
-    ordering = ['user__created_at']
+    ordering = ['-user__created_at']
     
     def get_queryset(self):
         # Check if user is Admin or Patient
@@ -224,9 +227,6 @@ class DoctorScheduleView(APIView):
             doctor = Doctor.objects.get(id=doctor_id, user__deleted_at__isnull=True)
         except Doctor.DoesNotExist:
             return Response({'error': 'Doctor not found'}, status=status.HTTP_404_NOT_FOUND)
-        
-        import calendar
-        from datetime import date, timedelta
         
         # Get next 4 weeks of available dates based on doctor's schedule
         today = date.today()
@@ -265,7 +265,7 @@ class DoctorScheduleView(APIView):
 
 class UpgradePatientClassView(APIView):
     """
-    Upgrade patient class (PBI-BE-U6: Admin only)
+    Upgrade patient class (PBI-BE-U6, PBI-FE-U6: Admin only)
     """
     permission_classes = [IsAdminUser]
     

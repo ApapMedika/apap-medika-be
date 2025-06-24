@@ -19,10 +19,17 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
+from profiles import views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('o/', include('oauth2_provider.urls', namespace='oauth2_provider')),
+
+    # Authentication endpoints
+    path('api/login/', views.LoginView.as_view(), name='login'),
+    path('api/signup/', views.SignUpView.as_view(), name='signup'),
+    path('api/logout/', views.LogoutView.as_view(), name='logout'),
+    path('api/jwt/', views.get_jwt_token, name='get_jwt_token'),
     
     # API Documentation
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),

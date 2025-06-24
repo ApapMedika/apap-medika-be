@@ -7,7 +7,7 @@ import dj_database_url
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = config('SECRET_KEY')
+SECRET_KEY = config('SECRET_KEY', default='django-insecure-jo6@=q6q$c#ufyl)#h_fgns6mtyx9!!!eltum!j*yaq4s4gj1=')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=True, cast=bool)
@@ -48,6 +48,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'common.middleware.JWTAuthenticationMiddleware',
     'oauth2_provider.middleware.OAuth2TokenMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -160,9 +161,9 @@ OAUTH2_PROVIDER = {
 }
 
 # JWT settings
-JWT_SECRET_KEY = config('JWT_SECRET_KEY')
+JWT_SECRET_KEY = config('JWT_SECRET_KEY', default='wRFOpHkSlGUoeKbqTRT9sbLC5XKm2MnLSLvEg0JwnJE')
 JWT_ALGORITHM = 'HS256'
-JWT_EXPIRATION_DELTA = 3600  # 1 hour
+JWT_EXPIRATION_DELTA = 3600 * 24  # 24 hours
 
 # Custom user model
 AUTH_USER_MODEL = 'profiles.EndUser'

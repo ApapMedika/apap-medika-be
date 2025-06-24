@@ -10,18 +10,17 @@ def generate_jwt_token(user):
     """
     Generate JWT token for user authentication
     """
+    now = timezone.now()
+    exp = now + timedelta(seconds=settings.JWT_EXPIRATION_DELTA)
+    
     payload = {
-        'user_id': str(user.id),
+        'id': str(user.id),
         'username': user.username,
         'email': user.email,
         'role': user.role,
-        'exp': timezone.now() + timedelta(days=settings.JWT_EXPIRATION_DELTA),
-        'iat': timezone.now(),
+        'exp': int(exp.timestamp()),
+        'iat': int(now.timestamp()),
     }
-    
-    # Convert datetime objects to timestamps for JSON serialization
-    payload['exp'] = int(payload['exp'].timestamp())
-    payload['iat'] = int(payload['iat'].timestamp())
     
     token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
     return token
@@ -46,7 +45,7 @@ def get_user_from_token(token):
     
     try:
         payload = decode_jwt_token(token)
-        user_id = payload.get('user_id')
+        user_id = payload.get('id')
         if user_id:
             return EndUser.objects.get(id=user_id, deleted_at__isnull=True)
         return None
