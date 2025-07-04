@@ -12,7 +12,8 @@ from .serializers import (
 )
 from common.permissions import (
     IsAdminUser, IsPharmacistUser, IsDoctorUser, IsAdminOrPharmacistUser,
-    IsAdminOrDoctorUser, IsPatientUser
+    IsAdminOrDoctorUser, IsPatientUser, IsAdminOrPharmacistOrDoctorOrNurseUser,
+    IsAdminOrPharmacistOrDoctorUser
 )
 from common.utils import soft_delete_object
 
@@ -21,13 +22,19 @@ from common.utils import soft_delete_object
 class MedicineListView(generics.ListCreateAPIView):
     """
     List all medicines or create new medicine
+    PBI-BE-P1: GET All Medicine (Admin, Pharmacist, Doctor, Nurse)
     """
     serializer_class = MedicineSerializer
-    permission_classes = [IsAdminOrPharmacistUser]
+    permission_classes = [IsAdminOrPharmacistOrDoctorOrNurseUser]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     search_fields = ['name', 'id']
     ordering_fields = ['id', 'name', 'price', 'stock', 'created_at']
     ordering = ['id']
+    
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAdminOrPharmacistUser()]
+        return [IsAdminOrPharmacistOrDoctorOrNurseUser()]
     
     def get_queryset(self):
         return Medicine.objects.filter(deleted_at__isnull=True)
@@ -35,12 +42,29 @@ class MedicineListView(generics.ListCreateAPIView):
 class MedicineDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
     Get, update, or delete medicine details
+    PBI-BE-P2: GET Medicine Detail (Admin, Pharmacist, Doctor, Nurse)
     """
     serializer_class = MedicineSerializer
-    permission_classes = [IsAdminOrPharmacistUser]
+    permission_classes = [IsAdminOrPharmacistOrDoctorOrNurseUser]
+    
+    def get_permissions(self):
+        if self.request.method in ['PUT', 'PATCH', 'DELETE']:
+            return [IsAdminOrPharmacistUser()]
+        return [IsAdminOrPharmacistOrDoctorOrNurseUser()]
     
     def get_queryset(self):
         return Medicine.objects.filter(deleted_at__isnull=True)
+    
+    def retrieve(self, request, *args, **kwargs):
+        """
+        Get medicine details with proper error handling (PBI-BE-P2)
+        """
+        try:
+            instance = self.get_object()
+            serializer = self.get_serializer(instance)
+            return Response(serializer.data)
+        except Medicine.DoesNotExist:
+            return Response({'error': 'Medicine not found'}, status=status.HTTP_404_NOT_FOUND)
     
     def perform_destroy(self, instance):
         # Check if medicine is used in any active prescriptions
@@ -60,8 +84,9 @@ class MedicineDetailView(generics.RetrieveUpdateDestroyAPIView):
 class MedicineStockUpdateView(APIView):
     """
     Update medicine stock (add to existing stock)
+    PBI-BE-P3: PUT Update a Medicine Stock (Pharmacist)
     """
-    permission_classes = [IsAdminOrPharmacistUser]
+    permission_classes = [IsPharmacistUser]
     
     def put(self, request, pk):
         try:
@@ -79,10 +104,11 @@ class MedicineStockUpdateView(APIView):
         except ValueError:
             return Response({'error': 'Stock must be a valid integer'}, status=status.HTTP_400_BAD_REQUEST)
         
+        # Update stock fails if input <= 0 (PBI-BE-P3)
         if stock <= 0:
             return Response({'error': 'Stock must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
         
-        # Add to existing stock
+        # Add to existing stock (PBI-BE-P3)
         medicine.stock += stock
         medicine.updated_by = request.user.username
         medicine.save()
@@ -95,8 +121,9 @@ class MedicineStockUpdateView(APIView):
 class RestockMedicinesView(APIView):
     """
     Restock multiple medicines at once
+    PBI-BE-P4: PUT Restock Medicines (Pharmacist)
     """
-    permission_classes = [IsAdminOrPharmacistUser]
+    permission_classes = [IsPharmacistUser]
     
     def post(self, request):
         serializer = MedicineRestockSerializer(data=request.data, context={'request': request})
@@ -115,11 +142,13 @@ class RestockMedicinesView(APIView):
 class PrescriptionListView(generics.ListCreateAPIView):
     """
     List all prescriptions or create new prescription
+    PBI-BE-P5: GET All Prescriptions (Pharmacist)
+    PBI-BE-P6: POST Create Prescription (Doctor)
     """
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['status']
     search_fields = ['id', 'patient__user__name']
-    ordering = ['-created_at']
+    ordering = ['-created_at']  # PBI-BE-P5: sorted by most recent
     
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -128,8 +157,8 @@ class PrescriptionListView(generics.ListCreateAPIView):
     
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsAdminOrDoctorUser()]
-        return [IsAdminOrPharmacistUser()]
+            return [IsDoctorUser()]
+        return [IsPharmacistUser()]
     
     def get_queryset(self):
         queryset = Prescription.objects.filter(deleted_at__isnull=True)
@@ -148,8 +177,11 @@ class PrescriptionListView(generics.ListCreateAPIView):
 class PrescriptionDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
     Get, update, or delete prescription details
+    GET Prescription Details (Pharmacist, Doctor)
+    PBI-BE-P7: PUT Update Prescription (Doctor, Pharmacist)
+    PBI-BE-P9: PUT Cancel Prescription (Doctor, Pharmacist)
     """
-    permission_classes = [IsAdminOrPharmacistUser]
+    permission_classes = [IsAdminOrPharmacistOrDoctorUser]
     
     def get_serializer_class(self):
         if self.request.method in ['PUT', 'PATCH']:
@@ -159,13 +191,27 @@ class PrescriptionDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         return Prescription.objects.filter(deleted_at__isnull=True)
     
+    def retrieve(self, request, *args, **kwargs):
+        """
+        Get prescription details with proper error handling
+        """
+        try:
+            instance = self.get_object()
+            serializer = self.get_serializer(instance)
+            return Response(serializer.data)
+        except Prescription.DoesNotExist:
+            return Response({'error': 'Prescription not found'}, status=status.HTTP_404_NOT_FOUND)
+    
     def perform_destroy(self, instance):
+        """
+        Cancel prescription (PBI-BE-P9)
+        """
         # Check if prescription can be cancelled
         if instance.status not in [0, 1]:  # Created or Waiting for stock
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Prescription can only be cancelled if status is Created or Waiting for Stock.")
         
-        # Return stock if prescription was waiting for stock
+        # Return stock if prescription was waiting for stock (PBI-BE-P9)
         if instance.status == 1:
             for medicine_quantity in instance.medicinequantity_set.all():
                 medicine = medicine_quantity.medicine
@@ -180,8 +226,9 @@ class PrescriptionDetailView(generics.RetrieveUpdateDestroyAPIView):
 class ProcessPrescriptionView(APIView):
     """
     Process prescription (mark as done)
+    PBI-BE-P8: PUT Change Prescription Status (Pharmacist)
     """
-    permission_classes = [IsAdminOrPharmacistUser]
+    permission_classes = [IsPharmacistUser]
     
     def post(self, request, pk):
         try:
@@ -204,7 +251,7 @@ class ProcessPrescriptionView(APIView):
         if serializer.is_valid():
             prescription = serializer.save()
             
-            # Determine status message
+            # Determine status message (PBI-BE-P8)
             if prescription.status == 2:
                 status_message = "Prescription completed successfully"
             else:
@@ -248,27 +295,22 @@ class PrescriptionStatisticsView(APIView):
             prescription__created_at__year=year,
             prescription__status=2,  # Only done prescriptions
             prescription__deleted_at__isnull=True
-        ).values(
-            'medicine__id',
-            'medicine__name'
-        ).annotate(
+        ).values('medicine__name').annotate(
             total_quantity=Sum('fulfilled_quantity')
-        ).order_by('-total_quantity')[:10]  # Top 10 most used medicines
+        ).order_by('-total_quantity')
         
         return Response({
             'month': month,
             'year': year,
-            'statistics': list(medicine_stats)
+            'medicine_usage': list(medicine_stats)
         }, status=status.HTTP_200_OK)
-
-# ==================== DOCTOR-SPECIFIC VIEWS ====================
 
 class DoctorPrescriptionListView(generics.ListAPIView):
     """
     List prescriptions for doctor (from their appointments)
     """
     serializer_class = PrescriptionSerializer
-    permission_classes = [IsAdminOrDoctorUser]
+    permission_classes = [IsDoctorUser]
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ['id', 'patient__user__name']
     ordering = ['-created_at']
@@ -276,9 +318,11 @@ class DoctorPrescriptionListView(generics.ListAPIView):
     def get_queryset(self):
         queryset = Prescription.objects.filter(deleted_at__isnull=True)
         
-        # If doctor, filter by their appointments
-        if self.request.user.role == 'DOCTOR':
+        # Filter by doctor's appointments
+        if hasattr(self.request.user, 'doctor'):
             queryset = queryset.filter(appointment__doctor=self.request.user.doctor)
+        else:
+            queryset = queryset.none()
         
         return queryset
 
@@ -287,18 +331,18 @@ class DoctorPrescriptionDetailView(generics.RetrieveAPIView):
     Get prescription details for doctor
     """
     serializer_class = PrescriptionSerializer
-    permission_classes = [IsAdminOrDoctorUser]
+    permission_classes = [IsDoctorUser]
     
     def get_queryset(self):
         queryset = Prescription.objects.filter(deleted_at__isnull=True)
         
-        # If doctor, filter by their appointments
-        if self.request.user.role == 'DOCTOR':
+        # Filter by doctor's appointments
+        if hasattr(self.request.user, 'doctor'):
             queryset = queryset.filter(appointment__doctor=self.request.user.doctor)
+        else:
+            queryset = queryset.none()
         
         return queryset
-
-# ==================== PATIENT-SPECIFIC VIEWS ====================
 
 class PatientPrescriptionListView(generics.ListAPIView):
     """

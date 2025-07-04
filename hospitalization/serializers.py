@@ -281,15 +281,16 @@ class CreateReservationSerializer(serializers.Serializer):
             reservation.total_fee = reservation.calculate_total_fee()
             reservation.save()
             
-            # Create bill for this reservation
-            from bill.models import Bill
-            Bill.objects.create(
-                patient=patient,
-                reservation=reservation,
-                status='TREATMENT_IN_PROGRESS',
-                created_by=reservation_data.get('created_by'),
-                updated_by=reservation_data.get('updated_by')
-            )
+            # Create bill if appointment ID is null (PBI-BE-H3)
+            if not validated_data.get('appointment'):
+                from bill.models import Bill
+                Bill.objects.create(
+                    patient=patient,
+                    reservation=reservation,
+                    status='TREATMENT_IN_PROGRESS',
+                    created_by=reservation_data.get('created_by'),
+                    updated_by=reservation_data.get('updated_by')
+                )
             
             return reservation
 

@@ -59,28 +59,18 @@ class PrescriptionSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'total_price', 'created_at', 'updated_at']
 
 class CreatePrescriptionSerializer(serializers.Serializer):
-    # Patient data (for new patient creation)
-    patient_id = serializers.UUIDField(required=False)
-    patient_name = serializers.CharField(required=False)
-    patient_nik = serializers.CharField(max_length=16, required=False)
-    patient_email = serializers.EmailField(required=False)
-    patient_gender = serializers.BooleanField(required=False)
-    patient_birth_place = serializers.CharField(required=False)
-    patient_birth_date = serializers.DateField(required=False)
-    patient_class = serializers.IntegerField(required=False)
-    
     # Prescription data
-    appointment_id = serializers.CharField(required=False)
+    appointment_id = serializers.CharField()  # Required for PBI-BE-P6
     medicines = serializers.ListField(
         child=serializers.DictField(child=serializers.CharField()),
-        min_length=1
+        min_length=1  # Required for PBI-BE-P6
     )
     
     def validate_medicines(self, value):
         """
         Validate medicines list
         """
-        medicine_ids = []
+        medicine_totals = defaultdict(int)
         
         for med_data in value:
             medicine_id = med_data.get('medicine_id')
@@ -94,6 +84,7 @@ class CreatePrescriptionSerializer(serializers.Serializer):
             except (ValueError, TypeError):
                 raise serializers.ValidationError("Quantity must be a valid integer.")
             
+            # PBI-BE-P6: Create Prescription fails if >=1 quantity of medicine requested <=0
             if quantity <= 0:
                 raise serializers.ValidationError("Quantity must be greater than 0.")
             
@@ -102,73 +93,33 @@ class CreatePrescriptionSerializer(serializers.Serializer):
             except Medicine.DoesNotExist:
                 raise serializers.ValidationError(f"Medicine with ID {medicine_id} does not exist.")
             
-            medicine_ids.append(medicine_id)
-        
-        # Check for duplicate medicines and sum quantities
-        medicine_totals = defaultdict(int)
-        for med_data in value:
-            medicine_totals[med_data['medicine_id']] += int(med_data['quantity'])
+            # PBI-BE-P6: If there are two or more drugs that are the same, then the requested quantity is added up
+            medicine_totals[medicine_id] += quantity
         
         return medicine_totals
     
     def create(self, validated_data):
-        from profiles.models import EndUser, Patient
-        from django.contrib.auth.hashers import make_password
+        from appointment.models import Appointment
         
-        # Get or create patient
-        patient = None
-        if validated_data.get('patient_id'):
-            try:
-                patient = Patient.objects.get(user__id=validated_data['patient_id'])
-            except Patient.DoesNotExist:
-                raise serializers.ValidationError("Patient not found.")
-        elif validated_data.get('appointment_id'):
-            try:
-                from appointment.models import Appointment
-                appointment = Appointment.objects.get(id=validated_data['appointment_id'])
-                patient = appointment.patient
-            except:
-                raise serializers.ValidationError("Appointment not found.")
-        else:
-            # Create new patient
-            user_data = {
-                'name': validated_data['patient_name'],
-                'username': validated_data['patient_nik'],
-                'email': validated_data['patient_email'],
-                'gender': validated_data['patient_gender'],
-                'role': 'PATIENT',
-                'password': make_password('defaultpassword123')  # Default password
-            }
-            user = EndUser.objects.create(**user_data)
-            
-            patient_data = {
-                'user': user,
-                'nik': validated_data['patient_nik'],
-                'birth_place': validated_data['patient_birth_place'],
-                'birth_date': validated_data['patient_birth_date'],
-                'p_class': validated_data.get('patient_class', 3)
-            }
-            patient = Patient.objects.create(**patient_data)
+        # Get appointment and patient
+        try:
+            appointment = Appointment.objects.get(id=validated_data['appointment_id'])
+            patient = appointment.patient
+        except Appointment.DoesNotExist:
+            raise serializers.ValidationError("Appointment not found.")
         
         # Generate prescription ID
         medicine_count = len(validated_data['medicines'])
         now = timezone.now()
-        prescription_id = get_prescription_code(medicine_count, now.weekday(), now.strftime('%H:%M:%S'))
+        prescription_id = get_prescription_code(medicine_count, now.weekday(), now.strftime('%H%M%S'))
         
         # Create prescription
         prescription_data = {
             'id': prescription_id,
             'patient': patient,
+            'appointment': appointment,
             'status': 0,  # Created
         }
-        
-        if validated_data.get('appointment_id'):
-            try:
-                from appointment.models import Appointment
-                appointment = Appointment.objects.get(id=validated_data['appointment_id'])
-                prescription_data['appointment'] = appointment
-            except:
-                pass
         
         # Set user fields
         request = self.context.get('request')

@@ -54,6 +54,14 @@ class IsAdminOrDoctorUser(permissions.BasePermission):
         return bool(request.user and request.user.is_authenticated and 
                    request.user.role in ['ADMIN', 'DOCTOR'])
 
+class IsAdminOrDoctorOrNurseUser(permissions.BasePermission):
+    """
+    Custom permission to only allow admin, doctor, or nurse users.
+    """
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and 
+                   request.user.role in ['ADMIN', 'DOCTOR', 'NURSE'])
+
 class IsAdminOrPharmacistUser(permissions.BasePermission):
     """
     Custom permission to only allow admin or pharmacist users.
@@ -80,3 +88,35 @@ class IsOwnerOrAdminUser(permissions.BasePermission):
             return obj.user == request.user
         
         return False
+
+class IsAdminOrPatientUser(permissions.BasePermission):
+    """
+    Custom permission to only allow admin or patient users.
+    """
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and 
+                   request.user.role in ['ADMIN', 'PATIENT'])
+
+class IsAdminOrNurseOrPatientUser(permissions.BasePermission):
+    """
+    Custom permission to only allow admin, nurse, or patient users.
+    """
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and 
+                   request.user.role in ['ADMIN', 'NURSE', 'PATIENT'])
+
+class IsAdminOrPharmacistOrDoctorOrNurseUser(permissions.BasePermission):
+    """
+    Custom permission to only allow admin, pharmacist, doctor, or nurse users.
+    """
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and 
+                   request.user.role in ['ADMIN', 'PHARMACIST', 'DOCTOR', 'NURSE'])
+
+class IsAdminOrPharmacistOrDoctorUser(permissions.BasePermission):
+    """
+    Custom permission to only allow admin, pharmacist, or doctor users.
+    """
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and 
+                   request.user.role in ['ADMIN', 'PHARMACIST', 'DOCTOR'])

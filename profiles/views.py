@@ -17,7 +17,7 @@ from .serializers import (
     LoginSerializer, SignUpSerializer, UserDetailSerializer,
     UpgradeClassSerializer
 )
-from common.permissions import IsAdminUser, IsAdminOrDoctorUser, IsAdminOrNurseUser
+from common.permissions import IsAdminUser, IsAdminOrDoctorUser, IsAdminOrNurseUser, IsAdminOrDoctorOrNurseUser
 from common.utils import generate_jwt_token
 
 class LoginView(APIView):
@@ -140,7 +140,7 @@ class PatientListView(generics.ListAPIView):
     List all patients (PBI-BE-U2: Admin, Doctor, Nurse)
     """
     serializer_class = PatientSerializer
-    permission_classes = [IsAdminOrDoctorUser | IsAdminOrNurseUser]
+    permission_classes = [IsAdminOrDoctorOrNurseUser]
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ['user__name', 'nik']
     ordering_fields = ['user__name', 'nik', 'user__created_at']
@@ -154,7 +154,7 @@ class PatientDetailView(generics.RetrieveAPIView):
     Get patient details by NIK (PBI-BE-U3: Admin, Doctor, Nurse)
     """
     serializer_class = PatientSerializer
-    permission_classes = [IsAdminOrDoctorUser | IsAdminOrNurseUser]
+    permission_classes = [IsAdminOrDoctorOrNurseUser]
     lookup_field = 'nik'
     
     def get_queryset(self):
@@ -164,7 +164,7 @@ class PatientSearchView(APIView):
     """
     Search patient by NIK
     """
-    permission_classes = [IsAdminOrDoctorUser | IsAdminOrNurseUser]
+    permission_classes = [IsAdminOrDoctorOrNurseUser]
     
     def post(self, request):
         nik = request.data.get('nik')

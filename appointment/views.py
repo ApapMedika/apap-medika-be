@@ -13,7 +13,7 @@ from .serializers import (
     UpdateAppointmentStatusSerializer
 )
 from common.permissions import (
-    IsAdminUser, IsAdminOrDoctorUser, IsAdminOrNurseUser, IsPatientUser
+    IsAdminUser, IsAdminOrDoctorUser, IsAdminOrNurseUser, IsPatientUser, IsAdminOrDoctorOrNurseUser, IsAdminOrPatientUser
 )
 from common.utils import soft_delete_object
 
@@ -49,9 +49,9 @@ class AppointmentListView(generics.ListCreateAPIView):
     def get_permissions(self):
         if self.request.method == 'POST':
             # Admin and Patient can create appointments
-            return [IsAdminUser | IsPatientUser]
+            return [IsAdminOrPatientUser()]
         # Admin and Nurse can view all appointments
-        return [IsAdminOrNurseUser]
+        return [IsAdminOrNurseUser()]
     
     def get_queryset(self):
         queryset = Appointment.objects.filter(deleted_at__isnull=True)
@@ -103,9 +103,9 @@ class AppointmentDetailView(generics.RetrieveUpdateDestroyAPIView):
     
     def get_permissions(self):
         if self.request.method == 'DELETE':
-            return [IsAdminUser]
+            return [IsAdminUser()]
         elif self.request.method in ['PUT', 'PATCH']:
-            return [IsAdminUser | IsPatientUser]
+            return [IsAdminOrPatientUser()]
         return [permissions.IsAuthenticated()]
     
     def perform_destroy(self, instance):
@@ -164,7 +164,7 @@ class AppointmentsByDateRangeView(APIView):
     Get appointment count by date range
     PBI-BE-A5: GET Appointment List by Date Range (Admin, Doctor, Nurse)
     """
-    permission_classes = [IsAdminOrDoctorUser | IsAdminOrNurseUser]
+    permission_classes = [IsAdminOrDoctorOrNurseUser]
     
     def get(self, request):
         from_date = request.query_params.get('from_date')
@@ -209,7 +209,7 @@ class UpdateAppointmentStatusView(APIView):
     Update appointment status (done/cancel)
     PBI-BE-A7: PUT Update Appointment Status (Admin, Patient)
     """
-    permission_classes = [IsAdminUser | IsPatientUser]
+    permission_classes = [IsAdminOrPatientUser]
     
     def put(self, request, pk, action):
         try:

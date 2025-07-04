@@ -12,7 +12,7 @@ from .serializers import (
     BillDetailSerializer
 )
 from common.permissions import (
-    IsAdminUser, IsAdminOrNurseUser, IsPatientUser
+    IsAdminUser, IsAdminOrNurseUser, IsPatientUser, IsAdminOrNurseOrPatientUser
 )
 
 # ==================== BILL VIEWS ====================
@@ -33,8 +33,8 @@ class BillListView(generics.ListCreateAPIView):
     
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsAdminOrNurseUser | IsPatientUser]
-        return [permissions.IsAuthenticated()]
+            return [IsAdminOrNurseOrPatientUser()]  # PBI-BE-B2: POST Create Bill (Admin, Patient, Nurse)
+        return [IsAdminUser()]  # List bills - Admin only
     
     def get_queryset(self):
         queryset = Bill.objects.filter(deleted_at__isnull=True)
@@ -67,8 +67,87 @@ class BillDetailView(generics.RetrieveUpdateAPIView):
     
     def get_permissions(self):
         if self.request.method in ['PUT', 'PATCH']:
-            return [IsPatientUser]
+            return [IsPatientUser()]  # PBI-BE-B3: PUT Update Bill (Patient)
         return [permissions.IsAuthenticated()]
+
+class BillsByPatientView(generics.ListAPIView):
+    """
+    GET All Bill by PatientId (PBI-BE-B1)
+    Returns the bill for a given patientId
+    """
+    serializer_class = BillSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [SearchFilter, OrderingFilter]
+    search_fields = ['id']
+    ordering = ['-created_at']
+    
+    def get_queryset(self):
+        patient_id = self.kwargs['patient_id']
+        
+        # Check permissions - Patient can only view their own bills
+        if (self.request.user.role == 'PATIENT' and 
+            str(self.request.user.patient.user.id) != str(patient_id)):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only view your own bills.")
+        
+        return Bill.objects.filter(
+            patient__user__id=patient_id,
+            deleted_at__isnull=True
+        )
+
+class CreateBillView(APIView):
+    """
+    POST Create Bill (PBI-BE-B2)
+    Bill successfully saved (Admin, Patient, Nurse)
+    This API is called when creating an appointment (Admin, Patient)
+    Required fields are: appointment id (Admin, Patient)
+    This API is called when creating a reservation that is not related to an appointment (Nurse)
+    Required fields are reservation id (Nurse)
+    """
+    permission_classes = [IsAdminOrNurseOrPatientUser]
+    
+    def post(self, request):
+        serializer = CreateBillSerializer(data=request.data, context={'request': request})
+        
+        if serializer.is_valid():
+            bill = serializer.save()
+            
+            return Response({
+                'message': 'Bill created successfully',
+                'bill': BillSerializer(bill).data
+            }, status=status.HTTP_201_CREATED)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class UpdateBillView(APIView):
+    """
+    PUT Update Bill (PBI-BE-B3)
+    Bill successfully updated according to the given payload (reservation id, policy id, status)
+    """
+    permission_classes = [IsPatientUser]
+    
+    def put(self, request, pk):
+        try:
+            bill = Bill.objects.get(pk=pk, deleted_at__isnull=True)
+        except Bill.DoesNotExist:
+            return Response({'error': 'Bill not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if patient owns this bill
+        if request.user.role == 'PATIENT' and bill.patient != request.user.patient:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only update your own bills.")
+        
+        serializer = UpdateBillSerializer(bill, data=request.data, context={'request': request})
+        
+        if serializer.is_valid():
+            updated_bill = serializer.save()
+            
+            return Response({
+                'message': 'Bill updated successfully',
+                'bill': BillSerializer(updated_bill).data
+            }, status=status.HTTP_200_OK)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class PayBillView(APIView):
     """
@@ -146,30 +225,6 @@ class BillSummaryView(APIView):
         
         serializer = BillSummarySerializer(summary_data)
         return Response(serializer.data, status=status.HTTP_200_OK)
-
-class BillsByPatientView(generics.ListAPIView):
-    """
-    Get all bills for a specific patient (PBI-BE-B1)
-    """
-    serializer_class = BillSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [SearchFilter, OrderingFilter]
-    search_fields = ['id']
-    ordering = ['-created_at']
-    
-    def get_queryset(self):
-        patient_id = self.kwargs['patient_id']
-        
-        # Check permissions
-        if (self.request.user.role == 'PATIENT' and 
-            str(self.request.user.patient.user.id) != str(patient_id)):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("You can only view your own bills.")
-        
-        return Bill.objects.filter(
-            patient__user__id=patient_id,
-            deleted_at__isnull=True
-        )
 
 class UnpaidBillsView(generics.ListAPIView):
     """
@@ -270,7 +325,6 @@ class BillStatisticsView(APIView):
         return Response({
             'period': period,
             'year': year,
-            'status_filter': status_filter,
             'statistics': stats
         }, status=status.HTTP_200_OK)
 

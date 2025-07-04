@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from datetime import date
+from django.db.models import Sum
 
 from .models import Coverage, Company, Policy, PolicyCoverage
 from .serializers import (
@@ -11,7 +12,7 @@ from .serializers import (
     UpdateCompanySerializer, PolicySerializer, CreatePolicySerializer,
     UpdatePolicySerializer, PolicyForTreatmentsSerializer
 )
-from common.permissions import IsAdminUser, IsPatientUser
+from common.permissions import IsAdminUser, IsPatientUser, IsAdminOrPatientUser
 from common.utils import soft_delete_object
 
 # ==================== COVERAGE VIEWS ====================
@@ -42,7 +43,7 @@ class CompanyListView(generics.ListCreateAPIView):
     
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsAdminUser]
+            return [IsAdminUser()]
         return [permissions.IsAuthenticated()]
     
     def get_queryset(self):
@@ -81,7 +82,11 @@ class CompanyDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class PolicyListView(generics.ListCreateAPIView):
     """
-    List all policies or create new policy (PBI-BE-I1)
+    GET All Policy (PBI-BE-I1)
+    Displays all policies registered in the system (Admin)
+    Displays all policies owned by patients registered in the system (Patient)
+    Policy data displayed includes policies with the status "Expired" or "Cancelled", 
+    but does not include policies that have been deleted (Admin, Patient)
     """
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['status']
@@ -96,11 +101,16 @@ class PolicyListView(generics.ListCreateAPIView):
     
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsAdminUser]
-        return [permissions.IsAuthenticated()]
+            return [IsAdminUser()]  # PBI-BE-I5: POST Create Policy (Admin)
+        return [IsAdminOrPatientUser()]  # PBI-BE-I1: GET All Policy (Admin, Patient)
     
     def get_queryset(self):
+        # PBI-BE-I1: Policy data displayed includes policies with the status "Expired" or "Cancelled", 
+        # but does not include policies that have been deleted
         queryset = Policy.objects.filter(deleted_at__isnull=True)
+        
+        # Update expired policies first (PBI-BE-I7)
+        self.update_expired_policies()
         
         # Role-based filtering
         if self.request.user.role == 'PATIENT':
@@ -133,23 +143,34 @@ class PolicyListView(generics.ListCreateAPIView):
             except ValueError:
                 pass
         
-        # Update expired policies (PBI-BE-I7)
-        # This could also be done with a periodic task
-        expired_policies = queryset.filter(
+        return queryset
+    
+    def update_expired_policies(self):
+        """
+        Update expired policies (PBI-BE-I7)
+        """
+        expired_policies = Policy.objects.filter(
             expiry_date__lt=date.today(),
-            status__in=[0, 1]  # Only update Created or Partially Claimed
+            status__in=[0, 1],  # Only update Created or Partially Claimed
+            deleted_at__isnull=True
         )
         for policy in expired_policies:
             policy.status = 3  # Expired
             policy.save()
-        
-        return queryset
 
 class PolicyDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
-    Get, update, or delete policy details (PBI-BE-I4, PBI-BE-I6)
+    GET Detail Policy by Policy ID (PBI-BE-I4)
+    Displays policy details with a specific ID (Admin)
+    Displays policy details with a specific patient ID (Patient)
+    
+    PUT Update Policy Expiry Date (PBI-BE-I6)
+    Expiry date of policy with specific ID successfully updated
+    
+    DELETE Delete Policy (PBI-BE-I9)
+    Policy with specified ID successfully deleted using soft delete mechanism
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdminOrPatientUser]
     
     def get_serializer_class(self):
         if self.request.method in ['PUT', 'PATCH']:
@@ -167,8 +188,8 @@ class PolicyDetailView(generics.RetrieveUpdateDestroyAPIView):
     
     def get_permissions(self):
         if self.request.method in ['PUT', 'PATCH', 'DELETE']:
-            return [IsAdminUser]
-        return [permissions.IsAuthenticated()]
+            return [IsAdminUser()]  # Only admin can update/delete
+        return [IsAdminOrPatientUser()]  # Both admin and patient can view
     
     def perform_destroy(self, instance):
         # PBI-BE-I9: Delete policy (soft delete)
@@ -177,14 +198,144 @@ class PolicyDetailView(generics.RetrieveUpdateDestroyAPIView):
             raise ValidationError("Only policies with 'Created' status can be deleted.")
         
         # Increase patient's available limit
-        # This would need to be implemented in the patient upgrade class view
+        if hasattr(instance.patient, 'increase_available_limit'):
+            instance.patient.increase_available_limit(instance.total_coverage)
         
         # Soft delete
         soft_delete_object(instance, self.request.user)
 
+class PolicyListByStatusView(generics.ListAPIView):
+    """
+    GET Policy List by Policy Status (PBI-BE-I2)
+    Displays all policies registered in the system based on a certain status (Admin)
+    Displays all policies owned by patients registered in the system based on a certain status (Patient)
+    Policy data displayed does not include policies that have been deleted (Admin, Patient)
+    """
+    serializer_class = PolicySerializer
+    permission_classes = [IsAdminOrPatientUser]
+    filter_backends = [SearchFilter, OrderingFilter]
+    search_fields = ['id', 'patient__user__name', 'company__name']
+    ordering = ['-created_at']
+    
+    def get_queryset(self):
+        status_param = self.kwargs.get('status')
+        
+        # Policy data displayed does not include policies that have been deleted
+        queryset = Policy.objects.filter(deleted_at__isnull=True)
+        
+        # Update expired policies first
+        self.update_expired_policies()
+        
+        # Role-based filtering
+        if self.request.user.role == 'PATIENT':
+            queryset = queryset.filter(patient=self.request.user.patient)
+        
+        # Status filtering
+        if status_param is not None:
+            try:
+                status_int = int(status_param)
+                queryset = queryset.filter(status=status_int)
+            except ValueError:
+                pass
+        
+        return queryset
+    
+    def update_expired_policies(self):
+        """Update expired policies"""
+        expired_policies = Policy.objects.filter(
+            expiry_date__lt=date.today(),
+            status__in=[0, 1],
+            deleted_at__isnull=True
+        )
+        for policy in expired_policies:
+            policy.status = 3
+            policy.save()
+
+class PolicyListByCoverageRangeView(generics.ListAPIView):
+    """
+    GET Policy List by Policy Total Coverage Range (PBI-BE-I3)
+    Displays all policies that have total coverage with a certain range from 'minCoverage' to 'maxCoverage' inclusively (Admin)
+    Displays all policies owned by patients that have total coverage with a certain range from 'minCoverage' to 'maxCoverage' inclusively (Patient)
+    Policy data displayed does not include policies that have been deleted (Admin, Patient)
+    """
+    serializer_class = PolicySerializer
+    permission_classes = [IsAdminOrPatientUser]
+    filter_backends = [SearchFilter, OrderingFilter]
+    search_fields = ['id', 'patient__user__name', 'company__name']
+    ordering = ['-created_at']
+    
+    def get_queryset(self):
+        min_coverage = self.request.query_params.get('minCoverage')
+        max_coverage = self.request.query_params.get('maxCoverage')
+        
+        # Policy data displayed does not include policies that have been deleted
+        queryset = Policy.objects.filter(deleted_at__isnull=True)
+        
+        # Role-based filtering
+        if self.request.user.role == 'PATIENT':
+            queryset = queryset.filter(patient=self.request.user.patient)
+        
+        # Coverage range filtering
+        if min_coverage:
+            try:
+                min_coverage = float(min_coverage)
+                queryset = queryset.filter(total_coverage__gte=min_coverage)
+            except ValueError:
+                pass
+        
+        if max_coverage:
+            try:
+                max_coverage = float(max_coverage)
+                queryset = queryset.filter(total_coverage__lte=max_coverage)
+            except ValueError:
+                pass
+        
+        return queryset
+
+class UpdatePolicyStatusView(APIView):
+    """
+    PUT Update Policy Status (PBI-BE-I7)
+    Status of policy whose total covered > Rp0 automatically updated to status = 1 (Partially Claimed)
+    Status of policy whose total covered == total coverage automatically updated to status = 2 (Fully Claimed)
+    Status of policy whose expiry date is less than today's date automatically updated to status = 3 (Expired)
+    """
+    permission_classes = [IsAdminUser]
+    
+    def put(self, request, pk):
+        try:
+            policy = Policy.objects.get(pk=pk, deleted_at__isnull=True)
+        except Policy.DoesNotExist:
+            return Response({'error': 'Policy not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Update policy status based on business logic
+        old_status = policy.status
+        
+        # Check if expired
+        if policy.expiry_date < date.today() and policy.status not in [2, 4]:
+            policy.status = 3  # Expired
+        # Check if fully claimed
+        elif policy.total_covered >= policy.total_coverage and policy.status != 4:
+            policy.status = 2  # Fully Claimed
+        # Check if partially claimed
+        elif policy.total_covered > 0 and policy.status not in [2, 3, 4]:
+            policy.status = 1  # Partially Claimed
+        
+        policy.updated_by = request.user.username
+        policy.save()
+        
+        return Response({
+            'message': f'Policy {policy.id} status updated from {old_status} to {policy.status}',
+            'old_status': old_status,
+            'new_status': policy.status,
+            'policy': PolicySerializer(policy).data
+        }, status=status.HTTP_200_OK)
+
 class CancelPolicyView(APIView):
     """
-    Cancel a policy (PBI-BE-I8)
+    PUT Cancel Policy (PBI-BE-I8)
+    Policy with specified ID successfully canceled and its status changed to status = 4 (Cancelled)
+    Policy whose status is not "Created" (status = 0) cannot be canceled
+    Patient's available limit increased by the total coverage of the canceled policy
     """
     permission_classes = [IsAdminUser]
     
@@ -205,6 +356,10 @@ class CancelPolicyView(APIView):
         policy.updated_by = request.user.username
         policy.save()
         
+        # Increase patient's available limit
+        if hasattr(policy.patient, 'increase_available_limit'):
+            policy.patient.increase_available_limit(policy.total_coverage)
+        
         return Response({
             'message': f'Policy {policy.id} has been cancelled',
             'policy': PolicySerializer(policy).data
@@ -212,11 +367,39 @@ class CancelPolicyView(APIView):
 
 class PolicyForTreatmentsView(APIView):
     """
-    Get policies that cover specific treatments (PBI-BE-I10)
+    GET/POST Policy List by Appointment Treatments (PBI-BE-I10)
+    Receives request in the form of list of treatments
+    Returns response in the form of list of policies with coverage that matches the request
+    Policies with coverage that has been used are not displayed
     """
     permission_classes = [IsAdminUser]
     
+    def get(self, request):
+        """GET endpoint for policy list by treatments"""
+        treatments = request.query_params.getlist('treatments')
+        
+        if not treatments:
+            return Response(
+                {'error': 'treatments parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get policies that have coverages for these treatments and are not used
+        policies = Policy.objects.filter(
+            policycoverage__coverage__name__in=treatments,
+            policycoverage__used=False,
+            status__in=[0, 1],  # Created or Partially Claimed
+            expiry_date__gt=date.today(),
+            deleted_at__isnull=True
+        ).distinct()
+        
+        return Response({
+            'treatments': treatments,
+            'policies': PolicySerializer(policies, many=True).data
+        }, status=status.HTTP_200_OK)
+    
     def post(self, request):
+        """POST endpoint for policy list by treatments"""
         serializer = PolicyForTreatmentsSerializer(data=request.data)
         
         if serializer.is_valid():
@@ -231,16 +414,14 @@ class PolicyForTreatmentsView(APIView):
                 deleted_at__isnull=True
             ).distinct()
             
-            # Filter by patient if patient role
-            if request.user.role == 'PATIENT':
-                policies = policies.filter(patient=request.user.patient)
-            
             return Response({
                 'treatments': treatments,
                 'policies': PolicySerializer(policies, many=True).data
             }, status=status.HTTP_200_OK)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+# ==================== STATISTICS VIEWS ====================
 
 class PolicyStatisticsView(APIView):
     """
@@ -249,193 +430,40 @@ class PolicyStatisticsView(APIView):
     permission_classes = [IsAdminUser]
     
     def get(self, request):
-        period = request.query_params.get('period', 'monthly')
-        year = request.query_params.get('year')
+        # Update expired policies first
+        expired_policies = Policy.objects.filter(
+            expiry_date__lt=date.today(),
+            status__in=[0, 1],
+            deleted_at__isnull=True
+        )
+        for policy in expired_policies:
+            policy.status = 3
+            policy.save()
         
-        if not year:
-            return Response(
-                {'error': 'Year parameter is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Get statistics
+        total_policies = Policy.objects.filter(deleted_at__isnull=True).count()
+        active_policies = Policy.objects.filter(status__in=[0, 1], deleted_at__isnull=True).count()
+        expired_policies = Policy.objects.filter(status=3, deleted_at__isnull=True).count()
+        cancelled_policies = Policy.objects.filter(status=4, deleted_at__isnull=True).count()
+        fully_claimed_policies = Policy.objects.filter(status=2, deleted_at__isnull=True).count()
         
-        try:
-            year = int(year)
-        except ValueError:
-            return Response(
-                {'error': 'Year must be an integer'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        total_coverage = Policy.objects.filter(deleted_at__isnull=True).aggregate(
+            total=Sum('total_coverage')
+        )['total'] or 0
         
-        if period == 'monthly':
-            # Monthly statistics
-            stats = []
-            for month in range(1, 13):
-                count = Policy.objects.filter(
-                    created_at__year=year,
-                    created_at__month=month,
-                    deleted_at__isnull=True
-                ).count()
-                stats.append({
-                    'period': f"{year}-{month:02d}",
-                    'count': count
-                })
-        elif period == 'quarterly':
-            # Quarterly statistics
-            stats = []
-            quarters = [
-                (1, [1, 2, 3]),
-                (2, [4, 5, 6]),
-                (3, [7, 8, 9]),
-                (4, [10, 11, 12])
-            ]
-            
-            for quarter, months in quarters:
-                count = Policy.objects.filter(
-                    created_at__year=year,
-                    created_at__month__in=months,
-                    deleted_at__isnull=True
-                ).count()
-                stats.append({
-                    'period': f"{year}-Q{quarter}",
-                    'count': count
-                })
-        else:
-            return Response(
-                {'error': 'Period must be "monthly" or "quarterly"'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        total_covered = Policy.objects.filter(deleted_at__isnull=True).aggregate(
+            total=Sum('total_covered')
+        )['total'] or 0
         
         return Response({
-            'period': period,
-            'year': year,
-            'statistics': stats
-        }, status=status.HTTP_200_OK)
-
-class PolicyChartDataView(APIView):
-    """
-    Get policy chart data for frontend
-    """
-    permission_classes = [IsAdminUser]
-    
-    def get(self, request):
-        period = request.query_params.get('period', 'monthly')
-        year = request.query_params.get('year')
-        
-        if not year:
-            return Response(
-                {'error': 'Year parameter is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            year = int(year)
-        except ValueError:
-            return Response(
-                {'error': 'Year must be an integer'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        labels = []
-        data = []
-        
-        if period == 'monthly':
-            month_names = [
-                'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-            ]
-            
-            for month in range(1, 13):
-                count = Policy.objects.filter(
-                    created_at__year=year,
-                    created_at__month=month,
-                    deleted_at__isnull=True
-                ).count()
-                labels.append(month_names[month - 1])
-                data.append(count)
-        
-        elif period == 'quarterly':
-            quarters = ['Q1', 'Q2', 'Q3', 'Q4']
-            quarter_months = [
-                [1, 2, 3],
-                [4, 5, 6],
-                [7, 8, 9],
-                [10, 11, 12]
-            ]
-            
-            for i, months in enumerate(quarter_months):
-                count = Policy.objects.filter(
-                    created_at__year=year,
-                    created_at__month__in=months,
-                    deleted_at__isnull=True
-                ).count()
-                labels.append(quarters[i])
-                data.append(count)
-        
-        return Response({
-            'labels': labels,
-            'datasets': [{
-                'label': f'Policies {year}',
-                'data': data,
-                'backgroundColor': 'rgba(34, 197, 94, 0.5)',
-                'borderColor': 'rgba(34, 197, 94, 1)',
-                'borderWidth': 1
-            }]
-        }, status=status.HTTP_200_OK)
-
-class UpgradePatientClassView(APIView):
-    """
-    Upgrade patient class
-    """
-    permission_classes = [IsAdminUser]
-    
-    def put(self, request, patient_id):
-        new_class = request.data.get('new_class')
-        
-        if not new_class:
-            return Response(
-                {'error': 'new_class is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            new_class = int(new_class)
-        except ValueError:
-            return Response(
-                {'error': 'new_class must be an integer'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if new_class not in [1, 2, 3]:
-            return Response(
-                {'error': 'new_class must be 1, 2, or 3'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            from profiles.models import Patient
-            patient = Patient.objects.get(user__id=patient_id, user__deleted_at__isnull=True)
-        except Patient.DoesNotExist:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        
-        if patient.p_class <= new_class:
-            return Response(
-                {'error': 'Can only upgrade to higher class'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        old_class = patient.p_class
-        patient.p_class = new_class
-        patient.save()
-        
-        return Response({
-            'message': f'Patient class upgraded from Class {old_class} to Class {new_class}',
-            'patient': {
-                'id': patient.user.id,
-                'name': patient.user.name,
-                'nik': patient.nik,
-                'old_class': old_class,
-                'new_class': new_class
-            }
+            'total_policies': total_policies,
+            'active_policies': active_policies,
+            'expired_policies': expired_policies,
+            'cancelled_policies': cancelled_policies,
+            'fully_claimed_policies': fully_claimed_policies,
+            'total_coverage': total_coverage,
+            'total_covered': total_covered,
+            'coverage_utilization': (total_covered / total_coverage * 100) if total_coverage > 0 else 0
         }, status=status.HTTP_200_OK)
 
 # ==================== PATIENT-SPECIFIC VIEWS ====================

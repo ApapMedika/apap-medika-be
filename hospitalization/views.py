@@ -12,7 +12,8 @@ from .serializers import (
     UpdateReservationFacilitiesSerializer
 )
 from common.permissions import (
-    IsAdminUser, IsAdminOrNurseUser, IsPatientUser
+    IsAdminUser, IsAdminOrNurseUser, IsPatientUser, IsNurseUser,
+    IsAdminOrNurseOrPatientUser
 )
 from common.utils import soft_delete_object
 
@@ -21,9 +22,10 @@ from common.utils import soft_delete_object
 class RoomListView(generics.ListCreateAPIView):
     """
     List all rooms or create new room
+    PBI-BE-H7: GET All Room (Nurse) - Date filter support
     """
     serializer_class = RoomSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsNurseUser]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     search_fields = ['id', 'name']
     ordering_fields = ['id', 'name', 'max_capacity', 'price_per_day', 'created_at']
@@ -31,13 +33,13 @@ class RoomListView(generics.ListCreateAPIView):
     
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsAdminUser]
-        return [permissions.IsAuthenticated()]
+            return [IsAdminUser()]
+        return [IsNurseUser()]
     
     def get_queryset(self):
         queryset = Room.objects.filter(deleted_at__isnull=True)
         
-        # Date-based filtering for availability
+        # Date-based filtering for availability (PBI-BE-H7)
         date_in = self.request.query_params.get('date_in')
         date_out = self.request.query_params.get('date_out')
         
@@ -63,12 +65,12 @@ class RoomDetailView(generics.RetrieveUpdateDestroyAPIView):
     Get, update, or delete room details
     """
     serializer_class = RoomSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsNurseUser]
     
     def get_permissions(self):
         if self.request.method in ['PUT', 'PATCH', 'DELETE']:
-            return [IsAdminUser]
-        return [permissions.IsAuthenticated()]
+            return [IsAdminUser()]
+        return [IsNurseUser()]
     
     def get_queryset(self):
         return Room.objects.filter(deleted_at__isnull=True)
@@ -146,7 +148,7 @@ class FacilityListView(generics.ListCreateAPIView):
     
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsAdminUser]
+            return [IsAdminUser()]
         return [permissions.IsAuthenticated()]
     
     def get_queryset(self):
@@ -171,6 +173,8 @@ class FacilityDetailView(generics.RetrieveUpdateDestroyAPIView):
 class ReservationListView(generics.ListCreateAPIView):
     """
     List all reservations or create new reservation
+    PBI-BE-H1: GET All Reservations (Nurse, Patient, Admin)
+    PBI-BE-H3: POST Create Reservation (Nurse)
     """
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     search_fields = ['id', 'patient__user__name', 'room__name']
@@ -183,31 +187,36 @@ class ReservationListView(generics.ListCreateAPIView):
     
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [IsAdminOrNurseUser]
-        return [permissions.IsAuthenticated()]
+            return [IsNurseUser()]
+        return [IsAdminOrNurseOrPatientUser()]
     
     def get_queryset(self):
         queryset = Reservation.objects.filter(deleted_at__isnull=True)
         
-        # Role-based filtering
+        # Role-based filtering (PBI-BE-H1)
         if self.request.user.role == 'NURSE':
+            # Return all reservations made by this nurse
             queryset = queryset.filter(assigned_nurse=self.request.user.nurse)
         elif self.request.user.role == 'PATIENT':
+            # Return all reservations for this patient
             queryset = queryset.filter(patient=self.request.user.patient)
+        # Admin can see all reservations
         
         return queryset
 
 class ReservationDetailView(generics.RetrieveDestroyAPIView):
     """
     Get or delete reservation details
+    PBI-BE-H2: GET Detail Reservation by ID (Nurse, Patient, Admin)
+    PBI-BE-H6: DELETE Reservation By ID (Nurse, Admin)
     """
     serializer_class = ReservationSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdminOrNurseOrPatientUser]
     
     def get_queryset(self):
         queryset = Reservation.objects.filter(deleted_at__isnull=True)
         
-        # Role-based filtering
+        # Role-based filtering (PBI-BE-H2)
         if self.request.user.role == 'NURSE':
             queryset = queryset.filter(assigned_nurse=self.request.user.nurse)
         elif self.request.user.role == 'PATIENT':
@@ -215,16 +224,27 @@ class ReservationDetailView(generics.RetrieveDestroyAPIView):
         
         return queryset
     
+    def get_permissions(self):
+        if self.request.method == 'DELETE':
+            return [IsAdminOrNurseUser()]
+        return [IsAdminOrNurseOrPatientUser()]
+    
+    def retrieve(self, request, *args, **kwargs):
+        """
+        Get reservation details with proper error handling (PBI-BE-H2)
+        """
+        try:
+            instance = self.get_object()
+            serializer = self.get_serializer(instance)
+            return Response(serializer.data)
+        except Reservation.DoesNotExist:
+            return Response({'error': 'Reservation not found'}, status=status.HTTP_404_NOT_FOUND)
+    
     def perform_destroy(self, instance):
-        # Check if reservation can be deleted (not ongoing)
+        # Check if reservation can be deleted (not ongoing) - PBI-BE-H6
         if instance.date_in <= date.today():
             from rest_framework.exceptions import ValidationError
             raise ValidationError("Cannot delete ongoing or past reservations.")
-        
-        # Only admin and nurses can delete reservations
-        if self.request.user.role not in ['ADMIN', 'NURSE']:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("You don't have permission to delete reservations.")
         
         # Soft delete
         soft_delete_object(instance, self.request.user)
@@ -232,8 +252,9 @@ class ReservationDetailView(generics.RetrieveDestroyAPIView):
 class UpdateReservationRoomView(APIView):
     """
     Update reservation room and dates
+    PBI-BE-H4: PUT Update Reservation date & room By ID (Nurse)
     """
-    permission_classes = [IsAdminOrNurseUser]
+    permission_classes = [IsNurseUser]
     
     def get(self, request, pk):
         """
@@ -263,10 +284,17 @@ class UpdateReservationRoomView(APIView):
         except Reservation.DoesNotExist:
             return Response({'error': 'Reservation not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Check permissions
+        # Check if user can update this reservation
         if (request.user.role == 'NURSE' and 
             reservation.assigned_nurse != request.user.nurse):
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Check if reservation can be updated (before date_in)
+        if reservation.date_in <= date.today():
+            return Response(
+                {'error': 'Cannot update reservation that has already started'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         serializer = UpdateReservationRoomSerializer(
             reservation,
@@ -277,7 +305,7 @@ class UpdateReservationRoomView(APIView):
         if serializer.is_valid():
             reservation = serializer.save()
             return Response({
-                'message': 'Reservation room and dates updated successfully',
+                'message': 'Reservation updated successfully',
                 'reservation': ReservationSerializer(reservation).data
             }, status=status.HTTP_200_OK)
         
@@ -286,12 +314,13 @@ class UpdateReservationRoomView(APIView):
 class UpdateReservationFacilitiesView(APIView):
     """
     Update reservation facilities
+    PBI-BE-H5: PUT Update Reservation Facilities By ID (Nurse)
     """
-    permission_classes = [IsAdminOrNurseUser]
+    permission_classes = [IsNurseUser]
     
     def get(self, request, pk):
         """
-        Get reservation details for facilities update
+        Get reservation details for facility update
         """
         try:
             reservation = Reservation.objects.get(pk=pk, deleted_at__isnull=True)
@@ -317,10 +346,17 @@ class UpdateReservationFacilitiesView(APIView):
         except Reservation.DoesNotExist:
             return Response({'error': 'Reservation not found'}, status=status.HTTP_404_NOT_FOUND)
         
-        # Check permissions
+        # Check if user can update this reservation
         if (request.user.role == 'NURSE' and 
             reservation.assigned_nurse != request.user.nurse):
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Check if reservation can be updated (before date_out)
+        if reservation.date_out <= date.today():
+            return Response(
+                {'error': 'Cannot update facilities after checkout date'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         serializer = UpdateReservationFacilitiesSerializer(
             reservation,
@@ -336,6 +372,8 @@ class UpdateReservationFacilitiesView(APIView):
             }, status=status.HTTP_200_OK)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+# ==================== STATISTICS VIEWS ====================
 
 class ReservationStatisticsView(APIView):
     """
@@ -366,8 +404,8 @@ class ReservationStatisticsView(APIView):
             stats = []
             for month in range(1, 13):
                 count = Reservation.objects.filter(
-                    created_at__year=year,
-                    created_at__month=month,
+                    date_in__year=year,
+                    date_in__month=month,
                     deleted_at__isnull=True
                 ).count()
                 stats.append({
@@ -386,8 +424,8 @@ class ReservationStatisticsView(APIView):
             
             for quarter, months in quarters:
                 count = Reservation.objects.filter(
-                    created_at__year=year,
-                    created_at__month__in=months,
+                    date_in__year=year,
+                    date_in__month__in=months,
                     deleted_at__isnull=True
                 ).count()
                 stats.append({
@@ -441,8 +479,8 @@ class ReservationChartDataView(APIView):
             
             for month in range(1, 13):
                 count = Reservation.objects.filter(
-                    created_at__year=year,
-                    created_at__month=month,
+                    date_in__year=year,
+                    date_in__month=month,
                     deleted_at__isnull=True
                 ).count()
                 labels.append(month_names[month - 1])
@@ -459,8 +497,8 @@ class ReservationChartDataView(APIView):
             
             for i, months in enumerate(quarter_months):
                 count = Reservation.objects.filter(
-                    created_at__year=year,
-                    created_at__month__in=months,
+                    date_in__year=year,
+                    date_in__month__in=months,
                     deleted_at__isnull=True
                 ).count()
                 labels.append(quarters[i])
@@ -471,13 +509,11 @@ class ReservationChartDataView(APIView):
             'datasets': [{
                 'label': f'Reservations {year}',
                 'data': data,
-                'backgroundColor': 'rgba(168, 85, 247, 0.5)',
-                'borderColor': 'rgba(168, 85, 247, 1)',
+                'backgroundColor': 'rgba(99, 255, 132, 0.5)',
+                'borderColor': 'rgba(99, 255, 132, 1)',
                 'borderWidth': 1
             }]
         }, status=status.HTTP_200_OK)
-
-# ==================== PATIENT-SPECIFIC VIEWS ====================
 
 class PatientReservationListView(generics.ListAPIView):
     """
